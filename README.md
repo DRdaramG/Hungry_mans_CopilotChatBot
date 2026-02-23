@@ -11,15 +11,19 @@ subscriptions.
 
 | Feature | Details |
 |---|---|
-| **Model toggle** | Switch between **Claude Opus 4.5**, **Gemini 1.5 Pro**, and **GPT-4o** mid-conversation using radio buttons |
+| **Model toggle** | Switch between **Claude Opus 4.5**, **Gemini 3 Pro**, and **GPT-4.1** mid-conversation using radio buttons |
 | **GitHub OAuth** | Device-flow authentication — no manual token copy-paste needed |
-| **Chat history as context** | Full conversation history is sent with every request so the bot remembers what was said |
+| **Multiple conversations** | Sidebar to create, rename, and delete named conversations; last active conversation is remembered between sessions |
+| **Persistent chat history** | Conversations are stored in a local SQLite database (`~/.copilot_chatbot.db`); old JSON history is migrated automatically |
+| **Token-aware context window** | Uses tiktoken to count tokens and trim history so every request fits within the model's context limit |
 | **Image input** | Attach `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` files; sent as base64 to multimodal models |
 | **Spreadsheet input** | Attach `.csv`, `.xls`, or `.xlsx` files; content is parsed and included as text |
-| **Personal prompts** | Save, edit, and delete named prompts; load any prompt into the input box with one click |
+| **Personal prompts** | Save, edit, and delete named prompts; activate multiple prompts with checkboxes (prepended automatically); drag-to-reorder |
+| **System prompt** | Set a per-conversation system prompt directly from the Prompt Manager |
 | **Import / export prompts** | Share prompt libraries as `.json` files |
 | **Save chat** | Export the conversation as JSON or plain text |
 | **Streaming responses** | Responses appear word-by-word as they arrive |
+| **Lazy-load history** | Scroll to the top of the chat to load older messages on demand |
 
 ---
 
@@ -38,7 +42,8 @@ pip install -r requirements.txt
 |---|---|
 | `requests` | HTTP calls to GitHub and Copilot APIs |
 | `openpyxl` | Read `.xlsx` Excel files |
-| `Pillow` | Image handling |
+| `tiktoken` | Accurate token counting for context-window management |
+| `typing_extensions` | Backport of newer `typing` features for Python < 3.11 |
 
 `tkinter` is used for the GUI and ships with the standard Python installer on
 Windows and macOS. On Linux you may need to install it separately:
@@ -78,6 +83,8 @@ Hungry_mans_CopilotChatBot/
     ├── __init__.py
     ├── app.py              # tkinter GUI (main window + all dialogs)
     ├── auth.py             # GitHub device-flow OAuth + token persistence
+    ├── chat_store.py       # SQLite-backed conversation & message storage
+    ├── context_manager.py  # Token-aware context-window trimming (tiktoken)
     ├── copilot_api.py      # Copilot Chat API client (streaming)
     ├── file_handler.py     # Image / CSV / Excel file processing
     └── prompt_manager.py   # Named-prompt CRUD + import/export
