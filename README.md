@@ -116,7 +116,7 @@ Hungry_mans_CopilotChatBot/
 
 ## Development motivation
 
-The author is a GitHub Copilot Pro+ subscriber (€39 / month — every lunch
+The author is a GitHub Copilot Pro+ subscriber (39$ / month — every lunch
 skipped) and wanted to use the Claude, Gemini, and GPT-4o models already
 included in that subscription through a comfortable desktop GUI, without
 signing up for additional paid services.
