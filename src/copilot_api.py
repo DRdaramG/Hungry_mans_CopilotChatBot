@@ -14,6 +14,7 @@ from typing import Generator, Iterator
 import requests
 
 from .auth import get_copilot_token
+from .context_manager import build_context_window
 
 log = logging.getLogger("copilot_chatbot")
 
@@ -128,13 +129,26 @@ class CopilotClient:
             log.debug("[API]   msg[%d] role=%-10s  content=%s", i, role, preview)
         log.debug("[API] ─────────────────────────")
 
+        # Trim the message list to fit within the context window before
+        # sending.  build_context_window() raises ValueError when the
+        # current user message alone is too large; that exception
+        # propagates up to the caller for user-facing display.
+        trimmed = build_context_window(messages)
+        if len(trimmed) < len(messages):
+            log.info(
+                "[API] Message list trimmed from %d to %d messages "
+                "to fit context window.",
+                len(messages),
+                len(trimmed),
+            )
+
         headers = {
             **_COPILOT_HEADERS,
             "Authorization": f"Bearer {self._copilot_token}",
         }
         payload = {
             "model":       model,
-            "messages":    messages,
+            "messages":    trimmed,
             "stream":      stream,
             "n":           1,
             "top_p":       1,
