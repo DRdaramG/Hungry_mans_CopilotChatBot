@@ -11,10 +11,16 @@ Flow:
 """
 
 import json
+import logging
 import os
 import time
 
 import requests
+
+# ---------------------------------------------------------------------------
+# Debug logger — prints to console so the user can see exactly what happens.
+# ---------------------------------------------------------------------------
+log = logging.getLogger("copilot_chatbot")
 
 # Public OAuth App client-id used by GitHub Copilot CLI / open-source clients.
 GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
@@ -29,12 +35,17 @@ TOKEN_FILE = os.path.expanduser("~/.copilot_chatbot_token.json")
 
 def request_device_code() -> dict:
     """Request a device code from GitHub and return the full JSON payload."""
+    url = "https://github.com/login/device/code"
+    data = {"client_id": GITHUB_CLIENT_ID}
+    log.debug("[AUTH] POST %s  client_id=%s", url, GITHUB_CLIENT_ID)
     response = requests.post(
-        "https://github.com/login/device/code",
+        url,
         headers={"Accept": "application/json"},
-        data={"client_id": GITHUB_CLIENT_ID, "scope": "read:user"},
+        data=data,
         timeout=15,
     )
+    log.debug("[AUTH] Device-code response: %s %s", response.status_code,
+              response.text[:500])
     response.raise_for_status()
     return response.json()
 
@@ -78,7 +89,10 @@ def poll_for_token(device_code: str, interval: int = 5,
         data = response.json()
 
         if "access_token" in data:
-            return data["access_token"]
+            tok = data["access_token"]
+            log.debug("[AUTH] GitHub token obtained — type=%s  len=%d  prefix=%s…",
+                      data.get("token_type", "?"), len(tok), tok[:8])
+            return tok
 
         error = data.get("error", "")
         if error == "authorization_pending":
@@ -109,16 +123,44 @@ def get_copilot_token(github_token: str) -> tuple[str, int]:
     -------
     (copilot_token, expires_at_unix_timestamp)
     """
-    response = requests.get(
-        "https://api.github.com/copilot_internal/v2/token",
-        headers={
-            "Authorization": f"token {github_token}",
-            "Accept": "application/json",
-        },
-        timeout=15,
-    )
+    url = "https://api.github.com/copilot_internal/v2/token"
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Accept": "application/json",
+        "User-Agent":    "GitHubCopilotChat/0.22.2",
+        "Editor-Version": "vscode/1.97.0",
+        "Editor-Plugin-Version": "copilot-chat/0.22.2",
+    }
+
+    log.debug("[AUTH] GET %s", url)
+    log.debug("[AUTH]   token prefix = %s…  len = %d",
+              github_token[:8], len(github_token))
+
+    response = requests.get(url, headers=headers, timeout=15)
+
+    log.debug("[AUTH] Copilot token-exchange response: %s", response.status_code)
+    log.debug("[AUTH]   response headers: %s",
+              {k: v for k, v in response.headers.items()
+               if k.lower() in ("x-github-request-id", "x-oauth-scopes",
+                                "x-accepted-oauth-scopes", "content-type")})
+    log.debug("[AUTH]   response body (first 800 chars): %s",
+              response.text[:800])
+
+    if response.status_code == 403:
+        body = response.text
+        raise RuntimeError(
+            f"Copilot token exchange failed (HTTP 403).\n"
+            f"Response: {body}\n\n"
+            f"Possible causes:\n"
+            f"  • GitHub Copilot Pro+ subscription may not be active\n"
+            f"  • The OAuth token may lack Copilot scopes\n"
+            f"  • The OAuth App client-id may be outdated"
+        )
+
     response.raise_for_status()
     data = response.json()
+    log.debug("[AUTH] Copilot bearer token obtained — expires_at=%s",
+              data.get("expires_at", "?"))
     return data["token"], int(data.get("expires_at", 0))
 
 

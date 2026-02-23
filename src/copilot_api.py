@@ -7,12 +7,15 @@ The Copilot token is refreshed automatically ~60 s before it expires.
 """
 
 import json
+import logging
 import time
 from typing import Generator, Iterator
 
 import requests
 
 from .auth import get_copilot_token
+
+log = logging.getLogger("copilot_chatbot")
 
 COPILOT_CHAT_URL = "https://api.githubcopilot.com/chat/completions"
 
@@ -31,9 +34,9 @@ MODELS: dict[str, str] = {
 _COPILOT_HEADERS = {
     "Content-Type":           "application/json",
     "Copilot-Integration-Id": "vscode-chat",
-    "Editor-Version":         "vscode/1.85.0",
-    "Editor-Plugin-Version":  "copilot-chat/0.12.0",
-    "User-Agent":             "GitHubCopilotChat/0.12.0",
+    "Editor-Version":         "vscode/1.97.0",
+    "Editor-Plugin-Version":  "copilot-chat/0.22.2",
+    "User-Agent":             "GitHubCopilotChat/0.22.2",
     "openai-intent":          "conversation-panel",
     "x-github-api-version":   "2023-07-07",
 }
@@ -53,10 +56,15 @@ class CopilotClient:
 
     def _ensure_token(self) -> None:
         """Refresh the Copilot bearer token when it is about to expire."""
-        if time.time() >= self._token_expires_at - 60:
+        now = time.time()
+        if now >= self._token_expires_at - 60:
+            log.debug("[API] Copilot token expired or missing (now=%.0f, "
+                      "expires=%.0f). Refreshing…", now, self._token_expires_at)
             self._copilot_token, self._token_expires_at = get_copilot_token(
                 self._github_token
             )
+            log.debug("[API] New Copilot token valid until %d",
+                      self._token_expires_at)
 
     @staticmethod
     def _parse_sse(response: requests.Response) -> Generator[str, None, None]:
@@ -106,6 +114,19 @@ class CopilotClient:
                    when *False* returns the full response as a plain string.
         """
         self._ensure_token()
+
+        # --- Debug: show what is actually being sent ---
+        log.debug("[API] ── Sending chat request ──")
+        log.debug("[API]   model = %s  |  stream = %s", model, stream)
+        log.debug("[API]   message count = %d", len(messages))
+        for i, m in enumerate(messages):
+            role = m.get("role", "?")
+            content = m.get("content", "")
+            preview = (content[:120] + "…") if isinstance(content, str) and len(content) > 120 else content
+            if isinstance(content, list):
+                preview = f"[multipart, {len(content)} parts]"
+            log.debug("[API]   msg[%d] role=%-10s  content=%s", i, role, preview)
+        log.debug("[API] ─────────────────────────")
 
         headers = {
             **_COPILOT_HEADERS,

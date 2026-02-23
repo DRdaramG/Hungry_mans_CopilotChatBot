@@ -17,7 +17,14 @@ import base64
 import csv
 import os
 from pathlib import Path
-from typing import NotRequired, TypedDict
+import sys
+
+if sys.version_info >= (3, 11):
+    from typing import NotRequired, TypedDict
+else:
+    from typing import TypedDict
+
+    from typing_extensions import NotRequired
 
 
 class FileData(TypedDict):
