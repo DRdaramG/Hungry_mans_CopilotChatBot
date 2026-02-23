@@ -120,6 +120,32 @@ class TestBuildContextWindow(unittest.TestCase):
         with self.assertRaises(ValueError):
             cm.build_context_window(msgs, max_tokens=500)
 
+    def test_reply_buffer_tokens_zero(self) -> None:
+        """When reply_buffer_tokens=0 the full budget is usable."""
+        msgs = [{"role": "user", "content": "Hello"}]
+        result = cm.build_context_window(
+            msgs, max_tokens=8192, reply_buffer_tokens=0,
+        )
+        self.assertEqual(result, msgs)
+        used = cm.count_messages_tokens(result)
+        # With reply_buffer=0, effective budget == max_tokens
+        self.assertLessEqual(used, 8192)
+
+    def test_custom_reply_buffer(self) -> None:
+        """A large reply_buffer_tokens shrinks the effective budget."""
+        big_msg = "x" * 10_000
+        msgs = [{"role": "user", "content": big_msg}]
+        # With reply_buffer=0 and a generous max_tokens, this should fit.
+        result = cm.build_context_window(
+            msgs, max_tokens=128_000, reply_buffer_tokens=0,
+        )
+        self.assertEqual(len(result), 1)
+        # But with a huge reply buffer it should fail.
+        with self.assertRaises(ValueError):
+            cm.build_context_window(
+                msgs, max_tokens=128_000, reply_buffer_tokens=128_000,
+            )
+
     def test_recent_history_kept_older_dropped(self) -> None:
         sys_msg = {"role": "system", "content": "Be brief."}
         old_pair = [

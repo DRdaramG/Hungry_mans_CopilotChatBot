@@ -109,6 +109,7 @@ def count_messages_tokens(messages: list[dict]) -> int:
 def build_context_window(
     messages: list[dict],
     max_tokens: int = MAX_CONTEXT_TOKENS,
+    reply_buffer_tokens: int = REPLY_BUFFER_TOKENS,
 ) -> list[dict]:
     """Return a trimmed copy of *messages* that fits within *max_tokens*.
 
@@ -119,13 +120,20 @@ def build_context_window(
         message and **must** end with the current ``"user"`` message.
     max_tokens:
         Token budget for the entire request (defaults to
-        :data:`MAX_CONTEXT_TOKENS`).
+        :data:`MAX_CONTEXT_TOKENS`).  When the caller has dynamic
+        per-model limits (e.g. ``max_prompt_tokens`` from the API),
+        pass them here.
+    reply_buffer_tokens:
+        Tokens reserved for the model's reply (defaults to
+        :data:`REPLY_BUFFER_TOKENS`).  Set to ``0`` when *max_tokens*
+        already represents the pure prompt budget (i.e. the API's
+        ``max_prompt_tokens`` which excludes output tokens).
 
     Returns
     -------
     list[dict]
-        Trimmed message list guaranteed to fit within *max_tokens* – after
-        reserving :data:`REPLY_BUFFER_TOKENS` for the assistant's reply.
+        Trimmed message list guaranteed to fit within
+        ``max_tokens - reply_buffer_tokens``.
 
     Raises
     ------
@@ -137,7 +145,7 @@ def build_context_window(
     if not messages:
         return []
 
-    effective_budget = max_tokens - REPLY_BUFFER_TOKENS
+    effective_budget = max_tokens - reply_buffer_tokens
 
     # ---- Separate parts -------------------------------------------------
     system_msgs: list[dict] = []
@@ -158,11 +166,11 @@ def build_context_window(
         raise ValueError(
             f"현재 메시지가 너무 큽니다 ({fixed_tokens:,} 토큰). "
             f"허용 가능한 최대 크기는 {effective_budget:,} 토큰입니다 "
-            f"(시스템 프롬프트 포함, 응답 공간 {REPLY_BUFFER_TOKENS:,} 토큰 제외). "
+            f"(시스템 프롬프트 포함, 응답 공간 {reply_buffer_tokens:,} 토큰 제외). "
             f"메시지를 줄이거나 첨부 파일을 제거해 주세요.\n\n"
             f"Your message is too large ({fixed_tokens:,} tokens). "
             f"Maximum allowed is {effective_budget:,} tokens "
-            f"(including system prompt, excluding {REPLY_BUFFER_TOKENS:,} reply tokens). "
+            f"(including system prompt, excluding {reply_buffer_tokens:,} reply tokens). "
             f"Please shorten your message or remove attachments."
         )
 
