@@ -1,16 +1,115 @@
-# Hungry_mans_CopilotChatBot
-Hungry_mans_CopilotChatBot
-사용 언어: Python
-주요 기능: Github Copilot과 VScode의 통신을 모방하여 챗봇을 구동 함.
-- Python 기반 GUI 환경에서 사용 가능 하도록 하는 것이 목표
-- Github Copilot 토큰을 발급받을 수 있는 기능 포함
-- 이미지 입력, 텍스트 입력, xls 및 csv 파일 입력을 지원
-- 지난 채팅 내역을 컨텍스트로 활용하여 챗봇이 대화의 흐름을 이해하고 적절한 답변을 제공할 수 있도록 하는 기능
-- 개인 프롬프트를 임포트 및 익스포트 할 수 있는 기능
-- Copilot에서 제공하는 Claude Opus 4.6 모델, Gemmini 3.1 Pro 모델, ChatGpt 5.2 모델을 토글을 통해 사용자가 바꿔가면서 챗을 이어나갈 수 있는 기능
-개발 동기
-- 사용자는 Github Copilot의 Pro+ 구독자임.
-- 사용자는 너무 가난하기 때문에 Claude나 ChatGPT 같은 유료 구독 서비스에 구독 할 여력이 없음. 
-- 따라서 사용자는 정당하게 돈을 주고 사용량을 쓸 수 있는 Copilot 프리미엄 할당량 안에서 챗봇을 사용할 수 있도록 이 프로젝트를 기획 함. 
-- 한 달 39달러를 내기 위해 사용자는 매 점심을 굶고 있으며, 다른 AI 서비스를 추가로 유료 구독할 여력이 전혀 없음. 
-- Copilot의 프리미엄 할당량을 최대한 활용하여 다양한 AI 모델을 사용할 수 있는 챗봇을 개발하는 것이 목표임.
+# Hungry Man's Copilot ChatBot 🍽️
+
+A Python-based desktop chatbot that connects to **GitHub Copilot**'s chat API,
+giving Copilot Pro+ subscribers access to multiple premium AI models through a
+friendly GUI — without paying for separate Claude, Gemini, or ChatGPT
+subscriptions.
+
+---
+
+## Features
+
+| Feature | Details |
+|---|---|
+| **Model toggle** | Switch between **Claude Opus 4.5**, **Gemini 1.5 Pro**, and **GPT-4o** mid-conversation using radio buttons |
+| **GitHub OAuth** | Device-flow authentication — no manual token copy-paste needed |
+| **Chat history as context** | Full conversation history is sent with every request so the bot remembers what was said |
+| **Image input** | Attach `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` files; sent as base64 to multimodal models |
+| **Spreadsheet input** | Attach `.csv`, `.xls`, or `.xlsx` files; content is parsed and included as text |
+| **Personal prompts** | Save, edit, and delete named prompts; load any prompt into the input box with one click |
+| **Import / export prompts** | Share prompt libraries as `.json` files |
+| **Save chat** | Export the conversation as JSON or plain text |
+| **Streaming responses** | Responses appear word-by-word as they arrive |
+
+---
+
+## Requirements
+
+* Python **3.10** or later
+* A **GitHub Copilot Pro+** subscription
+
+### Python dependencies
+
+```
+pip install -r requirements.txt
+```
+
+| Package | Purpose |
+|---|---|
+| `requests` | HTTP calls to GitHub and Copilot APIs |
+| `openpyxl` | Read `.xlsx` Excel files |
+| `Pillow` | Image handling |
+
+`tkinter` is used for the GUI and ships with the standard Python installer on
+Windows and macOS. On Linux you may need to install it separately:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install python3-tk
+```
+
+---
+
+## Quick start
+
+```bash
+# 1. Clone and install dependencies
+git clone https://github.com/DRdaramG/Hungry_mans_CopilotChatBot.git
+cd Hungry_mans_CopilotChatBot
+pip install -r requirements.txt
+
+# 2. Launch the app
+python main.py
+```
+
+On first launch go to **Settings → GitHub Authentication…** and follow the
+on-screen instructions to link your GitHub account.
+
+---
+
+## Project structure
+
+```
+Hungry_mans_CopilotChatBot/
+├── main.py                 # Entry point
+├── requirements.txt
+├── README.md
+└── src/
+    ├── __init__.py
+    ├── app.py              # tkinter GUI (main window + all dialogs)
+    ├── auth.py             # GitHub device-flow OAuth + token persistence
+    ├── copilot_api.py      # Copilot Chat API client (streaming)
+    ├── file_handler.py     # Image / CSV / Excel file processing
+    └── prompt_manager.py   # Named-prompt CRUD + import/export
+```
+
+---
+
+## How authentication works
+
+1. The app requests a **device code** from GitHub (using the public Copilot
+   OAuth App client-id `Iv1.b507a08c87ecfe98`).
+2. Your browser opens `https://github.com/login/device` — enter the displayed
+   code to authorise.
+3. The app polls GitHub until you complete authorisation, then stores the
+   resulting GitHub token in `~/.copilot_chatbot_token.json`.
+4. On every API call the GitHub token is exchanged for a short-lived
+   **Copilot API bearer token** (valid ~30 minutes, refreshed automatically).
+
+---
+
+## Keyboard shortcuts
+
+| Key | Action |
+|---|---|
+| `Enter` | Send message |
+| `Shift + Enter` | Insert a newline in the input box |
+
+---
+
+## Development motivation
+
+The author is a GitHub Copilot Pro+ subscriber (€39 / month — every lunch
+skipped) and wanted to use the Claude, Gemini, and GPT-4o models already
+included in that subscription through a comfortable desktop GUI, without
+signing up for additional paid services.
