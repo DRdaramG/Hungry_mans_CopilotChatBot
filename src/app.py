@@ -381,6 +381,7 @@ class CopilotChatApp:
     def _build_input_area(self) -> None:
         outer = ttk.Frame(self.root, padding=(10, 4))
         outer.pack(fill=tk.X, side=tk.BOTTOM)
+        self._input_frame = outer  # saved reference used by _refresh_attach_bar
 
         # Left column: icon buttons
         btn_col = ttk.Frame(outer)
@@ -559,7 +560,7 @@ class CopilotChatApp:
 
         if self._attachments:
             self._attach_outer.pack(
-                fill=tk.X, padx=10, pady=2, before=self.root.winfo_children()[-1]
+                fill=tk.X, padx=10, pady=2, before=self._input_frame
             )
             for idx, att in enumerate(self._attachments):
                 icon = "🖼️" if att["type"] == "image" else "📄"

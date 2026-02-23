@@ -17,18 +17,21 @@ import base64
 import csv
 import os
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 
 class FileData(TypedDict):
-    """Common structure returned by :func:`process_file`."""
+    """Common structure returned by :func:`process_file`.
 
-    type: str        # "image" | "text" | "error"
-    data: str        # base64 string for images, text content otherwise
-    name: str        # original file name
-    path: str        # absolute file path
-    # image-only
-    mime: str        # e.g. "image/png"
+    ``mime`` is only populated for ``type == "image"``; it is absent (or an
+    empty string) for text and error entries.
+    """
+
+    type: str             # "image" | "text" | "error"
+    data: str             # base64 string for images, text content otherwise
+    name: str             # original file name
+    path: str             # absolute file path
+    mime: NotRequired[str]  # e.g. "image/png" — present only for images
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +135,7 @@ def process_file(file_path: str) -> FileData:
     """
     ext = Path(file_path).suffix.lower()
     basename = os.path.basename(file_path)
-    base: FileData = {"name": basename, "path": file_path, "mime": "", "data": "", "type": ""}
+    base: FileData = {"name": basename, "path": file_path, "data": "", "type": ""}
 
     if ext in _IMAGE_MIME:
         b64, mime = _read_image(file_path)
