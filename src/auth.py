@@ -17,6 +17,8 @@ import time
 
 import requests
 
+from .paths import asset_path
+
 # ---------------------------------------------------------------------------
 # Debug logger — prints to console so the user can see exactly what happens.
 # ---------------------------------------------------------------------------
@@ -26,7 +28,7 @@ log = logging.getLogger("copilot_chatbot")
 GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
 
 # Where the GitHub PAT is cached between sessions.
-TOKEN_FILE = os.path.expanduser("~/.copilot_chatbot_token.json")
+TOKEN_FILE = asset_path("token.json")
 
 
 # ---------------------------------------------------------------------------

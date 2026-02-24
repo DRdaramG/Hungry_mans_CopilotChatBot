@@ -2,7 +2,7 @@
 Persistent storage for chat conversations using SQLite.
 
 Stores conversations and messages in a local SQLite database
-(``~/.copilot_chatbot.db`` by default) for efficient storage and
+(``Asset/chatbot.db`` inside the project root) for efficient storage and
 retrieval of long chat histories.
 
 Messages are retrieved in pages — only the most recent N messages are
@@ -18,10 +18,11 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from .paths import asset_path
+
 log = logging.getLogger("copilot_chatbot")
 
-DB_PATH = os.path.expanduser("~/.copilot_chatbot.db")
-OLD_JSON_PATH = os.path.expanduser("~/.copilot_chatbot_chats.json")
+DB_PATH = asset_path("chatbot.db")
 
 # How many messages to load at a time when scrolling up.
 PAGE_SIZE = 100
@@ -52,7 +53,6 @@ class ChatStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._create_tables()
-        self._migrate_json()
 
         self._active_id: str | None = None
         self._load_active_id()
@@ -96,75 +96,6 @@ class ChatStore:
             );
         """)
         self._conn.commit()
-
-    # ------------------------------------------------------------------
-    # JSON migration
-    # ------------------------------------------------------------------
-
-    def _migrate_json(self) -> None:
-        """One-time import of the old JSON chat store, if present."""
-        if not os.path.exists(OLD_JSON_PATH):
-            return
-        # Skip if we already have conversations in the DB
-        count = self._conn.execute(
-            "SELECT COUNT(*) FROM conversations",
-        ).fetchone()[0]
-        if count > 0:
-            return
-
-        log.info("[DB] Migrating chats from %s …", OLD_JSON_PATH)
-        try:
-            with open(OLD_JSON_PATH, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            convs = data.get("conversations", [])
-            old_active = data.get("active_id")
-
-            for cd in convs:
-                cid = cd.get("id", uuid.uuid4().hex[:12])
-                title = cd.get("title", "New Chat")
-                created = cd.get("created_at",
-                                 datetime.now(timezone.utc).isoformat())
-                updated = cd.get("updated_at",
-                                 datetime.now(timezone.utc).isoformat())
-                history = cd.get("history", [])
-
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO conversations"
-                    " (id, title, created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?)",
-                    (cid, title, created, updated),
-                )
-                for seq, msg in enumerate(history):
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    # Content may be a list (multipart) — store as JSON
-                    if isinstance(content, list):
-                        content_str = json.dumps(content, ensure_ascii=False)
-                    else:
-                        content_str = content
-                    self._conn.execute(
-                        "INSERT INTO messages"
-                        " (conv_id, seq, role, content, created_at)"
-                        " VALUES (?, ?, ?, ?, ?)",
-                        (cid, seq, role, content_str, updated),
-                    )
-            self._conn.commit()
-
-            if old_active:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value)"
-                    " VALUES ('active_id', ?)",
-                    (old_active,),
-                )
-                self._conn.commit()
-
-            # Rename old file so migration doesn't repeat
-            backup = OLD_JSON_PATH + ".migrated"
-            os.rename(OLD_JSON_PATH, backup)
-            log.info("[DB] Migrated %d conversations. Old file → %s",
-                     len(convs), backup)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("[DB] JSON migration failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Active conversation persistence
@@ -283,10 +214,11 @@ class ChatStore:
     # Message CRUD
     # ------------------------------------------------------------------
 
-    def add_message(self, conv_id: str, role: str, content) -> None:
+    def add_message(self, conv_id: str, role: str, content) -> int:
         """Append a message to a conversation.
 
         *content* can be a string or a list (multipart).
+        Returns the sequence number of the new message.
         """
         if isinstance(content, list):
             content_str = json.dumps(content, ensure_ascii=False)
@@ -312,6 +244,7 @@ class ChatStore:
             (now, conv_id),
         )
         self._conn.commit()
+        return seq
 
     def get_messages(
         self,
@@ -342,13 +275,13 @@ class ChatStore:
         actual_limit = remaining - start
 
         rows = self._conn.execute(
-            "SELECT role, content FROM messages"
+            "SELECT role, content, seq FROM messages"
             " WHERE conv_id=? ORDER BY seq ASC"
             " LIMIT ? OFFSET ?",
             (conv_id, actual_limit, start),
         ).fetchall()
         return [
-            {"role": r[0], "content": self._parse_content(r[1])}
+            {"role": r[0], "content": self._parse_content(r[1]), "seq": r[2]}
             for r in rows
         ]
 
@@ -375,6 +308,29 @@ class ChatStore:
         """Delete all messages in a conversation."""
         self._conn.execute(
             "DELETE FROM messages WHERE conv_id=?", (conv_id,),
+        )
+        self._conn.commit()
+
+    def get_message_by_seq(self, conv_id: str, seq: int) -> dict | None:
+        """Return a single message by conversation ID and sequence number."""
+        row = self._conn.execute(
+            "SELECT role, content FROM messages"
+            " WHERE conv_id=? AND seq=?",
+            (conv_id, seq),
+        ).fetchone()
+        if not row:
+            return None
+        return {"role": row[0], "content": self._parse_content(row[1])}
+
+    def update_message(self, conv_id: str, seq: int, content) -> None:
+        """Update the content of a message identified by conv_id and seq."""
+        if isinstance(content, list):
+            content_str = json.dumps(content, ensure_ascii=False)
+        else:
+            content_str = content
+        self._conn.execute(
+            "UPDATE messages SET content=? WHERE conv_id=? AND seq=?",
+            (content_str, conv_id, seq),
         )
         self._conn.commit()
 

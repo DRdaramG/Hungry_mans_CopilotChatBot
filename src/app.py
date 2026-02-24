@@ -507,6 +507,46 @@ class _PromptManagerDialog(tk.Toplevel):
         self._apply_system_prompt()
 
 
+class _EditMessageDialog(tk.Toplevel):
+    """Dialog for editing a chat message."""
+
+    def __init__(self, parent: tk.Tk, title: str, content: str) -> None:
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("600x400")
+        self.resizable(True, True)
+        self.grab_set()
+        self.result: str | None = None
+
+        f = ttk.Frame(self, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            f, text="메시지 내용을 수정하세요:",
+            font=("", 10),
+        ).pack(anchor=tk.W, pady=(0, 4))
+
+        self._text = scrolledtext.ScrolledText(
+            f, wrap=tk.WORD, font=("", 10),
+        )
+        self._text.pack(fill=tk.BOTH, expand=True)
+        self._text.insert("1.0", content)
+
+        btn_frame = ttk.Frame(f)
+        btn_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(btn_frame, text="Save",
+                   command=self._save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text="Cancel",
+                   command=self.destroy).pack(side=tk.RIGHT)
+
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self._text.focus_set()
+
+    def _save(self) -> None:
+        self.result = self._text.get("1.0", tk.END).rstrip("\n")
+        self.destroy()
+
+
 # ---------------------------------------------------------------------------
 # Main application
 # ---------------------------------------------------------------------------
@@ -532,6 +572,11 @@ class CopilotChatApp:
         self._displayed_offset: int = 0  # newest msgs already skipped (0 = none)
         self._all_loaded: bool = False     # True when no more older msgs exist
         self._loading_more: bool = False   # guard against concurrent loads
+
+        # Edit-button tracking for streaming assistant messages
+        self._last_edit_btn: tk.Button | None = None
+        self._streaming_conv_id: str | None = None
+        self._expected_asst_seq: int | None = None
 
         self._build_menu()
         self._build_layout()
@@ -582,7 +627,11 @@ class CopilotChatApp:
         self._new_chat_btn = ttk.Button(
             btn_frame, text="+ New Chat", command=self._new_conversation,
         )
-        self._new_chat_btn.pack(fill=tk.X)
+        self._new_chat_btn.pack(fill=tk.X, pady=(0, 2))
+        self._del_chat_btn = ttk.Button(
+            btn_frame, text="🗑 Delete Chat", command=self._delete_conversation,
+        )
+        self._del_chat_btn.pack(fill=tk.X)
 
         self._conv_listbox = tk.Listbox(
             sidebar, selectmode=tk.SINGLE, font=("", 10),
@@ -697,7 +746,8 @@ class CopilotChatApp:
     # Chat display helpers
     # ------------------------------------------------------------------
 
-    def _append(self, label: str, body: str, role: str) -> None:
+    def _append(self, label: str, body: str, role: str,
+                *, seq: int | None = None, conv_id: str | None = None) -> None:
         """Append a complete message block to the chat display."""
         self._chat.config(state=tk.NORMAL)
         if self._chat.get("1.0", tk.END).strip():
@@ -710,17 +760,47 @@ class CopilotChatApp:
             "error":  ("sys_lbl",   "err_msg"),
         }
         lbl_tag, body_tag = tag_map.get(role, ("sys_lbl", "sys_msg"))
+
+        # Edit button for user / assistant messages
+        if role in ("user", "asst") and conv_id and seq is not None:
+            cid, s = conv_id, seq
+            btn = tk.Button(
+                self._chat, text="\u270f", font=("", 7),
+                relief=tk.FLAT, cursor="hand2", padx=2, pady=0,
+                command=lambda c=cid, sq=s: self._edit_message(c, sq),
+            )
+            self._chat.window_create(tk.END, window=btn)
+            self._chat.insert(tk.END, " ")
+
+        # Message number for user / assistant
+        if role in ("user", "asst") and seq is not None:
+            label = f"{seq + 1} {label}"
+
         self._chat.insert(tk.END, f"{label}\n", lbl_tag)
         if body:
             self._chat.insert(tk.END, body, body_tag)
         self._chat.config(state=tk.DISABLED)
         self._chat.see(tk.END)
 
-    def _append_header(self, label: str, tag: str) -> None:
+    def _append_header(self, label: str, tag: str,
+                       *, seq: int | None = None,
+                       conv_id: str | None = None) -> None:
         """Insert only the speaker header (stream start)."""
         self._chat.config(state=tk.NORMAL)
         if self._chat.get("1.0", tk.END).strip():
             self._chat.insert(tk.END, "\n\n")
+
+        # Edit button (command updated in _pump_queue "done")
+        if conv_id and seq is not None:
+            btn = tk.Button(
+                self._chat, text="\u270f", font=("", 7),
+                relief=tk.FLAT, cursor="hand2", padx=2, pady=0,
+            )
+            self._chat.window_create(tk.END, window=btn)
+            self._chat.insert(tk.END, " ")
+            self._last_edit_btn = btn
+            label = f"{seq + 1} {label}"
+
         self._chat.insert(tk.END, f"{label}\n", tag)
         self._chat.config(state=tk.DISABLED)
         self._chat.see(tk.END)
@@ -734,6 +814,22 @@ class CopilotChatApp:
 
     def _sys_msg(self, text: str) -> None:
         self._append("ℹ️  System", text, "system")
+
+    def _edit_message(self, conv_id: str, seq: int) -> None:
+        """Open a dialog to edit a message in-place."""
+        msg = self._store.get_message_by_seq(conv_id, seq)
+        if not msg:
+            return
+        role = msg["role"]
+        display = self._content_to_display(msg["content"])
+        role_name = "You" if role == "user" else "Assistant"
+        title = f"Edit Message #{seq + 1} ({role_name})"
+
+        dlg = _EditMessageDialog(self.root, title, display)
+        self.root.wait_window(dlg)
+        if dlg.result is not None:
+            self._store.update_message(conv_id, seq, dlg.result)
+            self._render_history()
 
     # ------------------------------------------------------------------
     # Lazy-loading (scroll-to-top triggers older-message fetch)
@@ -777,33 +873,51 @@ class CopilotChatApp:
             self._loading_more = False
             return
 
-        # Save current scroll position (measured from bottom)
         self._chat.config(state=tk.NORMAL)
         old_end = self._chat.index(tk.END)
 
-        # Build text for older messages
-        blocks: list[str] = []
-        for msg in older:
+        # Insert messages in reverse order at "1.0" so oldest ends up at top
+        for msg in reversed(older):
             role = msg.get("role", "user")
             content = msg.get("content", "")
+            seq = msg.get("seq")
             display = self._content_to_display(content)
+
+            tag_map = {
+                "system":    ("sys_lbl",  "sys_msg"),
+                "user":      ("user_lbl", "user_msg"),
+                "assistant": ("asst_lbl", "asst_msg"),
+            }
+            lbl_tag, body_tag = tag_map.get(role, ("sys_lbl", "sys_msg"))
+
+            # Separator
+            self._chat.insert("1.0", "\n\n")
+
+            # Body
+            if display:
+                self._chat.insert("1.0", display, body_tag)
+
+            # Label (with number for user / assistant)
             if role == "system":
-                blocks.append(f"🔧 System:\n{display}")
+                self._chat.insert("1.0", "🔧 System:\n", lbl_tag)
             elif role == "user":
-                blocks.append(f"You:\n{display}")
-            elif role == "assistant":
-                blocks.append(f"Assistant:\n{display}")
+                num = f"{seq + 1} " if seq is not None else ""
+                self._chat.insert("1.0", f" {num}You:\n", lbl_tag)
+            else:
+                num = f"{seq + 1} " if seq is not None else ""
+                self._chat.insert("1.0", f" {num}Assistant:\n", lbl_tag)
 
-        prepend_text = "\n\n".join(blocks) + "\n\n"
+            # Edit button (user and assistant only)
+            if role in ("user", "assistant") and seq is not None:
+                s = seq
+                btn = tk.Button(
+                    self._chat, text="✏", font=("", 7),
+                    relief=tk.FLAT, cursor="hand2", padx=2, pady=0,
+                    command=lambda c=conv_id, sq=s: self._edit_message(c, sq),
+                )
+                self._chat.window_create("1.0", window=btn)
 
-        # Insert at the very top
-        self._chat.insert("1.0", prepend_text)
         self._chat.config(state=tk.DISABLED)
-
-        # Apply tags to prepended text
-        self._apply_tags_to_range("1.0", f"1.0 + {len(prepend_text)}c")
-
-        # Scroll back to where the user was (the old top)
         self._chat.see(old_end)
 
         self._displayed_offset += len(older)
@@ -812,27 +926,6 @@ class CopilotChatApp:
             self._all_loaded = True
 
         self._loading_more = False
-
-    def _apply_tags_to_range(self, start: str, end: str) -> None:
-        """Apply basic colour tags to prepended text (best-effort)."""
-        # For simplicity we re-tag known label patterns
-        self._chat.config(state=tk.NORMAL)
-        for pattern, tag in [
-            ("You:\n", "user_lbl"),
-            ("Assistant:\n", "asst_lbl"),
-            ("🔧 System:\n", "sys_lbl"),
-            ("ℹ️  System\n", "sys_lbl"),
-        ]:
-            search_start = start
-            while True:
-                pos = self._chat.search(pattern, search_start, end,
-                                        nocase=False)
-                if not pos:
-                    break
-                end_pos = f"{pos} + {len(pattern)}c"
-                self._chat.tag_add(tag, pos, end_pos)
-                search_start = end_pos
-        self._chat.config(state=tk.DISABLED)
 
     @staticmethod
     def _content_to_display(content) -> str:
@@ -854,16 +947,29 @@ class CopilotChatApp:
             while True:
                 kind, payload = self._queue.get_nowait()
                 if kind == "start":
-                    self._append_header(f"{payload}:", "asst_lbl")
+                    self._append_header(
+                        f"{payload}:", "asst_lbl",
+                        seq=self._expected_asst_seq,
+                        conv_id=self._streaming_conv_id,
+                    )
                 elif kind == "chunk":
                     self._stream_chunk(payload)
                 elif kind == "done":
                     if self._store.active_id:
-                        self._store.add_message(
+                        actual_seq = self._store.add_message(
                             self._store.active_id,
                             "assistant", payload,
                         )
                         self._store.auto_title(self._store.active_id)
+                        # Bind edit button now that we know the real seq
+                        btn = self._last_edit_btn
+                        if btn:
+                            cid = self._store.active_id
+                            btn.config(
+                                command=lambda c=cid, s=actual_seq:
+                                    self._edit_message(c, s),
+                            )
+                            self._last_edit_btn = None
                     self._send_btn.config(state=tk.NORMAL)
                     self._conv_listbox.config(state=tk.NORMAL)
                     self._new_chat_btn.config(state=tk.NORMAL)
@@ -1082,22 +1188,11 @@ class CopilotChatApp:
         if not text and not self._attachments:
             return
 
-        # ---- Prepend active (checked) prompts ---------------------------
-        active_prompts = self._pm.get_active_contents()
-        prompt_prefix = ""
-        if active_prompts:
-            prompt_parts = []
-            for pname, pcontent in active_prompts:
-                prompt_parts.append(f"[Prompt: {pname}]\n{pcontent}")
-            prompt_prefix = "\n\n".join(prompt_parts) + "\n\n"
-
-        # ---- Build OpenAI-style message content ----
-        combined_text = prompt_prefix + text if text else prompt_prefix.strip()
-
+        # ---- Build DB content (user input only, NO prompt prefix) --------
         if self._attachments:
             parts: list[dict] = []
-            if combined_text:
-                parts.append({"type": "text", "text": combined_text})
+            if text:
+                parts.append({"type": "text", "text": text})
             for att in self._attachments:
                 if att["type"] == "image":
                     parts.append({
@@ -1110,24 +1205,31 @@ class CopilotChatApp:
                     parts.append({"type": "text", "text": att["data"]})
             content: list | str = parts
         else:
-            content = combined_text
+            content = text
 
-        # ---- Append to DB ----
+        # ---- Append to DB (raw user input only) ----
+        user_seq = None
         if self._store.active_id:
-            self._store.add_message(
+            user_seq = self._store.add_message(
                 self._store.active_id, "user", content,
             )
             self._store.auto_title(self._store.active_id)
             self._refresh_sidebar()
 
         # ---- Display in chat ----
+        active_prompts = self._pm.get_active_contents()
         display = text
         if active_prompts:
             names = ", ".join(n for n, _ in active_prompts)
             display = f"[📌 {names}]\n{text}" if text else f"[📌 {names}]"
         for att in self._attachments:
             display += f"\n[📎 {att['name']}]"
-        self._append("You:", display, "user")
+        self._append("You:", display, "user",
+                     seq=user_seq, conv_id=self._store.active_id)
+
+        # Track expected seq for streaming assistant message
+        self._streaming_conv_id = self._store.active_id
+        self._expected_asst_seq = user_seq + 1 if user_seq is not None else None
 
         # ---- Reset input / attachments ----
         self._input.delete("1.0", tk.END)
@@ -1140,14 +1242,60 @@ class CopilotChatApp:
         self._new_chat_btn.config(state=tk.DISABLED)
         model_id = MODELS[self._model_var.get()]
         model_label = self._model_var.get()
-        # Fetch full history from DB for API context
+        # Fetch history from DB and inject active prompts for the API call
         all_msgs = (self._store.get_all_messages(self._store.active_id)
                     if self._store.active_id else [])
+        if active_prompts:
+            all_msgs = self._inject_prompts(all_msgs, active_prompts)
         threading.Thread(
             target=self._worker,
             args=(all_msgs, model_id, model_label),
             daemon=True,
         ).start()
+
+    @staticmethod
+    def _inject_prompts(
+        messages: list[dict],
+        active_prompts: list[tuple[str, str]],
+    ) -> list[dict]:
+        """Return a copy of *messages* with active prompts prepended to the
+        last user message.  The original list is not modified.
+
+        This is used only for API calls — prompts are never stored in DB.
+        """
+        if not active_prompts or not messages:
+            return messages
+
+        prompt_parts = []
+        for pname, pcontent in active_prompts:
+            prompt_parts.append(f"[Prompt: {pname}]\n{pcontent}")
+        prefix = "\n\n".join(prompt_parts) + "\n\n"
+
+        msgs = [m.copy() for m in messages]
+        # Find the last user message and prepend the prompt prefix
+        for i in range(len(msgs) - 1, -1, -1):
+            if msgs[i].get("role") == "user":
+                content = msgs[i]["content"]
+                if isinstance(content, list):
+                    # Multipart: prepend to the first text part
+                    new_parts = []
+                    prefixed = False
+                    for p in content:
+                        if isinstance(p, dict) and p.get("type") == "text" and not prefixed:
+                            new_parts.append({
+                                "type": "text",
+                                "text": prefix + p.get("text", ""),
+                            })
+                            prefixed = True
+                        else:
+                            new_parts.append(p)
+                    if not prefixed:
+                        new_parts.insert(0, {"type": "text", "text": prefix.strip()})
+                    msgs[i]["content"] = new_parts
+                else:
+                    msgs[i]["content"] = prefix + content
+                break
+        return msgs
 
     def _worker(self, messages: list[dict],
                 model_id: str, model_label: str) -> None:
@@ -1265,9 +1413,12 @@ class CopilotChatApp:
         if sel[0] >= len(convs):
             return
         conv = convs[sel[0]]
-        if not messagebox.askyesno("Delete Chat",
-                                   f"Delete '{conv.title}'?",
-                                   parent=self.root):
+        if not messagebox.askyesno(
+            "Delete Chat",
+            f"'{conv.title}' 채팅을 정말 삭제할까요?\n\n삭제하면 되돌릴 수 없습니다.",
+            icon=messagebox.WARNING,
+            parent=self.root,
+        ):
             return
         self._store.delete_conversation(conv.id)
         self._render_history()
@@ -1308,14 +1459,17 @@ class CopilotChatApp:
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
+            seq = msg.get("seq")
             display = self._content_to_display(content)
 
             if role == "system":
                 self._append("🔧 System:", display, "system")
             elif role == "user":
-                self._append("You:", display, "user")
+                self._append("You:", display, "user",
+                             seq=seq, conv_id=conv_id)
             elif role == "assistant":
-                self._append("Assistant:", display, "asst")
+                self._append("Assistant:", display, "asst",
+                             seq=seq, conv_id=conv_id)
 
         if not self._all_loaded:
             self._chat.config(state=tk.NORMAL)

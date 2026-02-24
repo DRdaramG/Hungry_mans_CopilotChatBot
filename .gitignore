@@ -13,6 +13,5 @@ venv/
 *.log
 *.tmp
 
-# User token/prompt storage (sensitive)
-~/.copilot_chatbot_token.json
-~/.copilot_chatbot_prompts.json
+# Asset folder — contains user token, chat DB, prompts (sensitive / generated)
+Asset/

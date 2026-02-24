@@ -422,8 +422,7 @@ class CopilotClient:
             log.debug("[API] New Copilot token valid until %d",
                       self._token_expires_at)
 
-    @staticmethod
-    def _parse_sse(response: requests.Response) -> Generator[str, None, None]:
+    def _parse_sse(self, response: requests.Response) -> Generator[str, None, None]:
         """
         Yield text deltas from a server-sent-events (SSE) stream.
         Works for OpenAI / Gemini / GPT models.
@@ -446,7 +445,10 @@ class CopilotClient:
                 break
             try:
                 chunk = json.loads(payload)
-                delta = chunk["choices"][0]["delta"].get("content", "")
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {}).get("content", "")
                 if delta:
                     chunk_count += 1
                     yield delta
@@ -468,8 +470,7 @@ class CopilotClient:
                 "The model may have returned an empty response.",
             )
 
-    @staticmethod
-    def _parse_claude_sse(response: requests.Response) -> Generator[str, None, None]:
+    def _parse_claude_sse(self, response: requests.Response) -> Generator[str, None, None]:
         """
         Yield text deltas from a Claude (Anthropic Messages API) SSE stream.
 

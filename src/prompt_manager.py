@@ -2,19 +2,21 @@
 Personal-prompt manager.
 
 Prompts are stored as a JSON object (``{name: content}``) in
-``~/.copilot_chatbot_prompts.json`` by default.  The class also supports
+``Asset/prompts.json`` inside the project root.  The class also supports
 exporting that file to an arbitrary path and importing from one.
 """
 
 import json
 import os
 
+from .paths import asset_path
+
 
 class PromptManager:
     """CRUD wrapper around a JSON file of named prompt strings."""
 
-    DEFAULT_FILE = os.path.expanduser("~/.copilot_chatbot_prompts.json")
-    ACTIVE_FILE = os.path.expanduser("~/.copilot_chatbot_active_prompts.json")
+    DEFAULT_FILE = asset_path("prompts.json")
+    ACTIVE_FILE = asset_path("active_prompts.json")
 
     def __init__(self, storage_file: str | None = None,
                  active_file: str | None = None) -> None:
