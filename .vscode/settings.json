@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^python -c \"from src\\.context_manager import build_context_window, build_messages_from_layout, count_message_tokens; print\\('context_manager OK'\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

@@ -643,11 +643,51 @@ class CopilotClient:
         """Return the cached :class:`ModelLimits` for *model_id*, or *None*."""
         return self._model_limits.get(model_id)
 
+    def build_preview_payload(
+        self,
+        messages: list[dict],
+        model: str = "gpt-4o",
+    ) -> dict:
+        """Build the full API payload **without** sending it.
+
+        Returns a dict containing ``"endpoint"``, ``"payload"``, and
+        ``"message_count"`` so the caller can display a preview.
+        """
+        family = get_model_family(model)
+        limits = self.get_model_limits(model)
+
+        if family == "claude":
+            formatted, system_text = _format_messages_claude(messages)
+            max_out = limits.max_output_tokens if limits else 16_000
+            payload = _build_payload_claude(
+                formatted, model, stream=True,
+                system_text=system_text,
+                max_output_tokens=max_out,
+            )
+            endpoint = COPILOT_CLAUDE_URL
+        elif family == "gemini":
+            formatted = _format_messages_gemini(messages)
+            payload = _build_payload_gemini(formatted, model, stream=True)
+            endpoint = COPILOT_CHAT_URL
+        else:
+            formatted = _format_messages_openai(messages)
+            payload = _build_payload_openai(formatted, model, stream=True)
+            endpoint = COPILOT_CHAT_URL
+
+        return {
+            "endpoint": endpoint,
+            "model_family": family,
+            "message_count": len(formatted),
+            "payload": payload,
+        }
+
     def chat(
         self,
         messages: list[dict],
         model: str = "gpt-4o",
         stream: bool = True,
+        *,
+        pre_assembled: bool = False,
     ) -> Iterator[str] | str:
         """
         Send *messages* to the Copilot chat completions endpoint.
@@ -658,6 +698,11 @@ class CopilotClient:
         model    : Copilot model identifier (see :data:`MODELS`).
         stream   : When *True* (default) returns a generator of text deltas;
                    when *False* returns the full response as a plain string.
+        pre_assembled :
+            When *True*, *messages* have already been trimmed to fit the
+            model's prompt token budget (via
+            :func:`~context_manager.build_messages_from_layout`).
+            The internal ``build_context_window`` step is skipped.
         """
         self._ensure_token()
 
@@ -679,31 +724,37 @@ class CopilotClient:
         log.debug("[API] ─────────────────────────")
 
         # ---- Trim to fit context window ---------------------------------
-        limits = self.get_model_limits(model)
-        if limits:
-            log.debug(
-                "[API] Using dynamic limits for %s: prompt=%d, output=%d",
-                model, limits.max_prompt_tokens, limits.max_output_tokens,
-            )
-            trimmed = build_context_window(
-                messages,
-                max_tokens=limits.max_prompt_tokens,
-                reply_buffer_tokens=0,
-            )
+        if pre_assembled:
+            # Messages were already assembled and trimmed by the caller
+            # (build_messages_from_layout); skip internal trimming.
+            trimmed = messages
+            limits = self.get_model_limits(model)
         else:
-            log.debug(
-                "[API] No dynamic limits for model %s; using defaults.",
-                model,
-            )
-            trimmed = build_context_window(messages)
+            limits = self.get_model_limits(model)
+            if limits:
+                log.debug(
+                    "[API] Using dynamic limits for %s: prompt=%d, output=%d",
+                    model, limits.max_prompt_tokens, limits.max_output_tokens,
+                )
+                trimmed = build_context_window(
+                    messages,
+                    max_tokens=limits.max_prompt_tokens,
+                    reply_buffer_tokens=0,
+                )
+            else:
+                log.debug(
+                    "[API] No dynamic limits for model %s; using defaults.",
+                    model,
+                )
+                trimmed = build_context_window(messages)
 
-        if len(trimmed) < len(messages):
-            log.info(
-                "[API] Message list trimmed from %d to %d messages "
-                "to fit context window.",
-                len(messages),
-                len(trimmed),
-            )
+            if len(trimmed) < len(messages):
+                log.info(
+                    "[API] Message list trimmed from %d to %d messages "
+                    "to fit context window.",
+                    len(messages),
+                    len(trimmed),
+                )
 
         # ---- Model-specific formatting & payload ------------------------
         if family == "claude":

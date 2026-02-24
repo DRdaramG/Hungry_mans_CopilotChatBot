@@ -209,3 +209,137 @@ def build_context_window(
         count_messages_tokens(result),
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Layout-based context builder
+# ---------------------------------------------------------------------------
+
+def build_messages_from_layout(
+    layout: list[tuple[str, str, str, str]],
+    history_messages: list[dict],
+    current_user_message: dict,
+    system_prompt_msg: dict | None = None,
+    max_tokens: int = MAX_CONTEXT_TOKENS,
+) -> list[dict]:
+    """Build a message list according to the user-defined prompt layout.
+
+    Unlike :func:`build_context_window`, this function places prompt
+    instructions and conversation history at the **positions** defined by
+    the user's layout template instead of the fixed
+    ``[system | history | user]`` order.
+
+    Parameters
+    ----------
+    layout:
+        Ordered list of ``(type, name, content, role)`` tuples produced by
+        :pymethod:`PromptManager.get_ordered_layout`.
+        * ``("slot", "{{CHAT_HISTORY}}", "", "")`` — history placeholder.
+        * ``("slot", "{{USER_INPUT}}", "", "")``  — current user message.
+        * ``("prompt", "<name>", "<content>", "<role>")``  — active prompt.
+    history_messages:
+        Past user/assistant turns (no system messages, no current user).
+    current_user_message:
+        The current user message dict.
+    system_prompt_msg:
+        Optional per-conversation system prompt (always placed first).
+        Kept for backward compatibility with existing conversations that
+        already have one stored in the DB.
+    max_tokens:
+        Token budget for the entire prompt payload (usually
+        ``ModelLimits.max_prompt_tokens``).
+
+    Returns
+    -------
+    list[dict]
+        Assembled message list ready for the API.
+
+    Raises
+    ------
+    ValueError
+        When system prompt + all active prompts + the current user
+        message exceed *max_tokens* (no room left even for zero history).
+    """
+    from .prompt_manager import SLOT_CHAT_HISTORY, SLOT_USER_INPUT
+
+    if not layout:
+        # Fallback: behave like the old builder.
+        msgs = []
+        if system_prompt_msg:
+            msgs.append(system_prompt_msg)
+        msgs.extend(history_messages)
+        msgs.append(current_user_message)
+        return build_context_window(msgs, max_tokens=max_tokens,
+                                    reply_buffer_tokens=0)
+
+    # ---- 1. Measure fixed token costs -----------------------------------
+    fixed_tokens = 3  # reply-priming overhead
+
+    if system_prompt_msg:
+        fixed_tokens += count_message_tokens(system_prompt_msg)
+
+    fixed_tokens += count_message_tokens(current_user_message)
+
+    prompt_msgs: list[tuple[str, dict]] = []   # (name, msg_dict)
+    for item_type, name, content, role in layout:
+        if item_type == "prompt":
+            msg = {"role": role, "content": content}
+            fixed_tokens += count_message_tokens(msg)
+            prompt_msgs.append((name, msg))
+
+    if fixed_tokens > max_tokens:
+        raise ValueError(
+            f"프롬프트와 사용자 메시지의 토큰 합계({fixed_tokens:,})가 "
+            f"허용 한도({max_tokens:,})를 초과합니다. "
+            f"프롬프트를 줄이거나 비활성화해 주세요.\n\n"
+            f"The total tokens of prompts and user message ({fixed_tokens:,}) "
+            f"exceed the allowed limit ({max_tokens:,}). "
+            f"Please reduce or deactivate some prompts."
+        )
+
+    # ---- 2. Fill history with remaining budget --------------------------
+    remaining = max_tokens - fixed_tokens
+    selected_history: list[dict] = []
+
+    for msg in reversed(history_messages):
+        t = count_message_tokens(msg)
+        if t <= remaining:
+            selected_history.insert(0, msg)
+            remaining -= t
+        else:
+            break
+
+    if len(selected_history) < len(history_messages):
+        dropped = len(history_messages) - len(selected_history)
+        log.info(
+            "[CTX] Layout builder: dropped %d oldest message(s) "
+            "to stay within %d-token limit.",
+            dropped,
+            max_tokens,
+        )
+
+    # ---- 3. Assemble in layout order ------------------------------------
+    result: list[dict] = []
+    if system_prompt_msg:
+        result.append(system_prompt_msg)
+
+    prompt_iter = iter(prompt_msgs)
+    for item_type, name, _content, _role in layout:
+        if item_type == "prompt":
+            _pname, pmsg = next(prompt_iter)
+            result.append(pmsg)
+        elif name == SLOT_CHAT_HISTORY:
+            result.extend(selected_history)
+        elif name == SLOT_USER_INPUT:
+            result.append(current_user_message)
+
+    total_used = count_messages_tokens(result)
+    log.debug(
+        "[CTX] build_messages_from_layout: %d messages "
+        "(%d history included), ~%d tokens (budget %d)",
+        len(result),
+        len(selected_history),
+        total_used,
+        max_tokens,
+    )
+    return result

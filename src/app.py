@@ -32,9 +32,15 @@ import requests
 
 from .auth import delete_token, load_token, poll_for_token, request_device_code, save_token
 from .chat_store import ChatStore
+from .context_manager import build_messages_from_layout
 from .copilot_api import MODELS, CopilotAPIError, CopilotClient
 from .file_handler import process_file
-from .prompt_manager import PromptManager
+from .prompt_manager import (
+    SLOT_DESCRIPTIONS,
+    SLOT_DISPLAY_NAMES,
+    VALID_ROLES,
+    PromptManager,
+)
 
 log = logging.getLogger("copilot_chatbot")
 
@@ -145,24 +151,35 @@ class _AuthDialog(tk.Toplevel):
 
 
 class _PromptEditDialog(tk.Toplevel):
-    """Simple multi-line text editor for a single prompt."""
+    """Multi-line text editor for a single prompt, with role selector."""
 
-    def __init__(self, parent: tk.Widget, title: str, content: str) -> None:
+    def __init__(self, parent: tk.Widget, title: str, content: str,
+                 role: str = "system") -> None:
         super().__init__(parent)
         self.title(title)
-        self.geometry("520x320")
+        self.geometry("520x350")
         self.grab_set()
         self.result: str | None = None
+        self.role_result: str | None = None
 
         f = ttk.Frame(self, padding=10)
         f.pack(fill=tk.BOTH, expand=True)
 
-        # Buttons at the top so they are always visible
-        btn = ttk.Frame(f)
-        btn.pack(fill=tk.X, pady=(0, 6))
-        ttk.Button(btn, text="Save",
+        # Top row: role selector + buttons
+        top = ttk.Frame(f)
+        top.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Label(top, text="Role:").pack(side=tk.LEFT, padx=(0, 4))
+        self._role_var = tk.StringVar(value=role)
+        role_cb = ttk.Combobox(
+            top, textvariable=self._role_var,
+            values=list(VALID_ROLES), state="readonly", width=10,
+        )
+        role_cb.pack(side=tk.LEFT, padx=(0, 12))
+
+        ttk.Button(top, text="Save",
                    command=self._save).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btn, text="Cancel",
+        ttk.Button(top, text="Cancel",
                    command=self.destroy).pack(side=tk.RIGHT)
 
         self._text = scrolledtext.ScrolledText(f, wrap=tk.WORD, font=("", 10))
@@ -171,13 +188,14 @@ class _PromptEditDialog(tk.Toplevel):
 
     def _save(self) -> None:
         self.result = self._text.get("1.0", tk.END).strip()
+        self.role_result = self._role_var.get()
         self.destroy()
 
 
 class _PromptManagerDialog(tk.Toplevel):
     """Dialog to browse, edit, and select saved prompts.
 
-    Also provides Import / Export and System Prompt management.
+    Also provides Import / Export and per-prompt role selection.
     """
 
     def __init__(
@@ -185,21 +203,18 @@ class _PromptManagerDialog(tk.Toplevel):
         parent: tk.Widget,
         pm: PromptManager,
         on_select=None,
-        *,
-        store: ChatStore | None = None,
-        on_system_prompt_changed=None,
     ) -> None:
         super().__init__(parent)
         self.title("Prompt Manager")
-        self.geometry("600x520")
+        self.geometry("640x480")
         self.grab_set()
 
         self._pm = pm
         self._on_select = on_select
-        self._store: ChatStore | None = store
-        self._on_system_prompt_changed = on_system_prompt_changed
         self._check_vars: dict[str, tk.BooleanVar] = {}  # name → checkbox var
+        self._role_vars: dict[str, tk.StringVar] = {}    # name → role var
         self._row_widgets: dict[str, ttk.Frame] = {}     # name → row frame
+        self._name_labels: dict[str, ttk.Label] = {}     # name → label widget
         self._selected_name_val: str | None = None
         self._drag_name: str | None = None
 
@@ -207,32 +222,9 @@ class _PromptManagerDialog(tk.Toplevel):
         self._refresh()
 
     def _build_ui(self) -> None:
-        # ---- Top: System Prompt ------------------------------------------
-        sys_frame = ttk.LabelFrame(self, text="System Prompt", padding=6)
-        sys_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
-
-        self._sys_text = scrolledtext.ScrolledText(
-            sys_frame, height=3, wrap=tk.WORD, font=("", 9),
-        )
-        self._sys_text.pack(fill=tk.X)
-
-        # Pre-fill with current system prompt from store
-        current_sys = ""
-        if self._store and self._store.active_id:
-            current_sys = self._store.get_system_prompt(self._store.active_id)
-        if current_sys:
-            self._sys_text.insert(tk.END, current_sys)
-
-        sys_btn_row = ttk.Frame(sys_frame)
-        sys_btn_row.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(sys_btn_row, text="Apply System Prompt",
-                   command=self._apply_system_prompt).pack(side=tk.RIGHT)
-        ttk.Button(sys_btn_row, text="Clear",
-                   command=self._clear_system_prompt).pack(side=tk.RIGHT, padx=4)
-
-        # ---- Middle: Prompt list + buttons ------------------------------
+        # ---- Prompt list + buttons --------------------------------------
         paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         left = ttk.Frame(paned)
         paned.add(left, weight=3)
@@ -299,22 +291,21 @@ class _PromptManagerDialog(tk.Toplevel):
     # -- list helpers -----------------------------------------------------
 
     def _refresh(self) -> None:
-        # Clear existing checkbox rows
+        # Clear existing rows
         for w in self._list_inner.winfo_children():
             w.destroy()
         self._check_vars.clear()
+        self._role_vars.clear()
         self._row_widgets.clear()
+        self._name_labels.clear()
         self._selected_name_val = None
 
         for name in self._pm.list_names():
-            var = tk.BooleanVar(value=self._pm.is_active(name))
-            self._check_vars[name] = var
-
             row = ttk.Frame(self._list_inner)
             row.pack(fill=tk.X, padx=2, pady=1)
             self._row_widgets[name] = row
 
-            # Drag handle
+            # Drag handle (always present)
             handle = ttk.Label(row, text="\u2261", font=("", 11),
                                cursor="fleur", width=2)
             handle.pack(side=tk.LEFT, padx=(0, 2))
@@ -323,15 +314,50 @@ class _PromptManagerDialog(tk.Toplevel):
             handle.bind("<B1-Motion>", self._drag_motion)
             handle.bind("<ButtonRelease-1>", self._drag_end)
 
-            cb = ttk.Checkbutton(
-                row, variable=var,
-                command=lambda n=name, v=var: self._on_check_toggled(n, v),
-            )
-            cb.pack(side=tk.LEFT)
+            if PromptManager.is_slot(name):
+                # --- Slot row: lock icon, italic label, no checkbox ---
+                lock = ttk.Label(row, text="\U0001F512", font=("", 9),
+                                 width=2)
+                lock.pack(side=tk.LEFT)
 
-            lbl = ttk.Label(row, text=name, font=("", 10), cursor="hand2")
-            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            lbl.bind("<Button-1>", lambda _e, n=name: self._select_row(n))
+                display = SLOT_DISPLAY_NAMES.get(name, name)
+                lbl = ttk.Label(row, text=display,
+                                font=("", 10, "italic"),
+                                foreground="#888888", cursor="hand2")
+                lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                lbl.bind("<Button-1>",
+                         lambda _e, n=name: self._select_row(n))
+            else:
+                # --- Regular prompt row: checkbox + role + label ---
+                var = tk.BooleanVar(value=self._pm.is_active(name))
+                self._check_vars[name] = var
+
+                cb = ttk.Checkbutton(
+                    row, variable=var,
+                    command=lambda n=name, v=var: self._on_check_toggled(n, v),
+                )
+                cb.pack(side=tk.LEFT)
+
+                # Role dropdown
+                role_var = tk.StringVar(value=self._pm.get_role(name))
+                self._role_vars[name] = role_var
+                role_cb = ttk.Combobox(
+                    row, textvariable=role_var,
+                    values=list(VALID_ROLES), state="readonly", width=8,
+                )
+                role_cb.pack(side=tk.LEFT, padx=(2, 4))
+                role_cb.bind(
+                    "<<ComboboxSelected>>",
+                    lambda _e, n=name, rv=role_var: self._on_role_changed(n, rv),
+                )
+
+                lbl = ttk.Label(row, text=name, font=("", 10),
+                                cursor="hand2")
+                lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                lbl.bind("<Button-1>",
+                         lambda _e, n=name: self._select_row(n))
+
+            self._name_labels[name] = lbl
 
         self._list_inner.update_idletasks()
 
@@ -339,26 +365,35 @@ class _PromptManagerDialog(tk.Toplevel):
         """Called when a checkbox is toggled — persist active state."""
         self._pm.set_active(name, var.get())
 
+    def _on_role_changed(self, name: str, var: tk.StringVar) -> None:
+        """Called when a role dropdown is changed — persist role."""
+        self._pm.set_role(name, var.get())
+
     def _select_row(self, name: str) -> None:
         """Highlight a row and show its preview (for edit/delete/use)."""
         self._selected_name_val = name
         # Visual feedback: bold the selected label, un-bold others
-        for child_row in self._list_inner.winfo_children():
-            for widget in child_row.winfo_children():
-                if isinstance(widget, ttk.Label):
-                    if widget.cget("text") == name:
-                        widget.configure(font=("", 10, "bold"),
-                                         foreground="#005cc5")
-                    else:
-                        widget.configure(font=("", 10),
-                                         foreground="")
+        for n, lbl in self._name_labels.items():
+            if n == name:
+                lbl.configure(font=("", 10, "bold"),
+                              foreground="#005cc5")
+            else:
+                if PromptManager.is_slot(n):
+                    lbl.configure(font=("", 10, "italic"),
+                                  foreground="#888888")
+                else:
+                    lbl.configure(font=("", 10),
+                                  foreground="")
         self._preview()
 
     def _preview(self, _event=None) -> None:
         name = self._selected_name_val
         if not name:
             return
-        content = self._pm.get(name)
+        if PromptManager.is_slot(name):
+            content = SLOT_DESCRIPTIONS.get(name, "")
+        else:
+            content = self._pm.get(name)
         self._preview_text.config(state=tk.NORMAL)
         self._preview_text.delete("1.0", tk.END)
         self._preview_text.insert(tk.END, content if content else "(empty)")
@@ -429,25 +464,30 @@ class _PromptManagerDialog(tk.Toplevel):
         name = simpledialog.askstring("New Prompt", "Prompt name:", parent=self)
         if not name:
             return
-        dlg = _PromptEditDialog(self, f"New Prompt — {name}", "")
+        dlg = _PromptEditDialog(self, f"New Prompt — {name}", "",
+                                role="system")
         self.wait_window(dlg)
         if dlg.result is not None:
-            self._pm.add(name, dlg.result)
+            self._pm.add(name, dlg.result,
+                         role=dlg.role_result or "system")
             self._refresh()
 
     def _edit(self) -> None:
         name = self._selected_name()
-        if not name:
+        if not name or PromptManager.is_slot(name):
             return
-        dlg = _PromptEditDialog(self, f"Edit — {name}", self._pm.get(name))
+        dlg = _PromptEditDialog(self, f"Edit — {name}",
+                                self._pm.get(name),
+                                role=self._pm.get_role(name))
         self.wait_window(dlg)
         if dlg.result is not None:
-            self._pm.add(name, dlg.result)
+            self._pm.add(name, dlg.result,
+                         role=dlg.role_result or "system")
             self._refresh()
 
     def _delete(self) -> None:
         name = self._selected_name()
-        if not name:
+        if not name or PromptManager.is_slot(name):
             return
         if messagebox.askyesno("Delete",
                                f"Delete prompt '{name}'?", parent=self):
@@ -456,7 +496,7 @@ class _PromptManagerDialog(tk.Toplevel):
 
     def _use(self) -> None:
         name = self._selected_name()
-        if not name:
+        if not name or PromptManager.is_slot(name):
             return
         if self._on_select:
             self._on_select(self._pm.get(name))
@@ -493,18 +533,6 @@ class _PromptManagerDialog(tk.Toplevel):
             self._pm.export(path)
             messagebox.showinfo("Export", f"Prompts exported to:\n{path}",
                                 parent=self)
-
-    # -- System Prompt ----------------------------------------------------
-
-    def _apply_system_prompt(self) -> None:
-        text = self._sys_text.get("1.0", tk.END).strip()
-        # Notify the app (which will persist via store)
-        if self._on_system_prompt_changed:
-            self._on_system_prompt_changed(text)
-
-    def _clear_system_prompt(self) -> None:
-        self._sys_text.delete("1.0", tk.END)
-        self._apply_system_prompt()
 
 
 class _EditMessageDialog(tk.Toplevel):
@@ -737,6 +765,8 @@ class CopilotChatApp:
         self._send_btn = ttk.Button(act_col, text="Send ➤",
                                     command=self._send, width=9)
         self._send_btn.pack(pady=2)
+        ttk.Button(act_col, text="Preview 👁", command=self._preview_payload,
+                   width=9).pack(pady=2)
         ttk.Button(act_col, text="Clear 🗑", command=self._clear_chat,
                    width=9).pack(pady=2)
 
@@ -1098,20 +1128,10 @@ class CopilotChatApp:
     # ------------------------------------------------------------------
 
     def _show_prompt_mgr(self) -> None:
-        def _on_sys_changed(text: str) -> None:
-            if self._store.active_id:
-                self._store.set_system_prompt(self._store.active_id, text)
-            if text:
-                self._sys_msg(f"System prompt set ({len(text)} chars).")
-            else:
-                self._sys_msg("System prompt cleared.")
-
         _PromptManagerDialog(
             self.root,
             self._pm,
             on_select=self._insert_prompt,
-            store=self._store,
-            on_system_prompt_changed=_on_sys_changed,
         )
 
     def _insert_prompt(self, content: str) -> None:
@@ -1150,11 +1170,7 @@ class CopilotChatApp:
             return
         conv_id = self._store.active_id
         if conv_id:
-            # Preserve system prompt if present
-            sys_prompt = self._store.get_system_prompt(conv_id)
             self._store.clear_messages(conv_id)
-            if sys_prompt:
-                self._store.set_system_prompt(conv_id, sys_prompt)
 
         self._chat.config(state=tk.NORMAL)
         self._chat.delete("1.0", tk.END)
@@ -1164,6 +1180,110 @@ class CopilotChatApp:
         self._all_loaded = True  # nothing to load after clear
 
         self._sys_msg("Chat cleared.")
+
+    # ------------------------------------------------------------------
+    # Preview payload
+    # ------------------------------------------------------------------
+
+    def _preview_payload(self) -> None:
+        """Build the full API payload from the current input and show it
+        in a read-only popup — **without** sending anything to the LLM."""
+        if not self._client:
+            messagebox.showwarning(
+                "Not Authenticated",
+                "Please authenticate via Settings → GitHub Authentication…",
+            )
+            return
+
+        text = self._input.get("1.0", tk.END).strip()
+        if not text and not self._attachments:
+            return
+
+        # ---- Build user content (same logic as _send) ----
+        if self._attachments:
+            parts: list[dict] = []
+            if text:
+                parts.append({"type": "text", "text": text})
+            for att in self._attachments:
+                if att["type"] == "image":
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{att['mime']};base64,{att['data'][:40]}…(truncated)"
+                        },
+                    })
+                elif att["type"] in ("text", "error"):
+                    parts.append({"type": "text", "text": att["data"]})
+            content: list | str = parts
+        else:
+            content = text
+
+        # ---- Assemble messages via layout ----
+        layout = self._pm.get_ordered_layout()
+        current_user_msg = {"role": "user", "content": content}
+
+        all_msgs = (self._store.get_all_messages(self._store.active_id)
+                    if self._store.active_id else [])
+
+        system_prompt_msg = None
+        history: list[dict] = []
+        for msg in all_msgs:
+            if msg.get("role") == "system":
+                system_prompt_msg = msg
+            else:
+                history.append(msg)
+
+        model_id = MODELS[self._model_var.get()]
+        limits = (self._client.get_model_limits(model_id)
+                  if self._client else None)
+        max_prompt_tokens = limits.max_prompt_tokens if limits else 8_192
+
+        try:
+            assembled = build_messages_from_layout(
+                layout, history, current_user_msg,
+                system_prompt_msg=system_prompt_msg,
+                max_tokens=max_prompt_tokens,
+            )
+        except ValueError as exc:
+            messagebox.showerror("Token Limit", str(exc))
+            return
+
+        # ---- Build model-specific payload via CopilotClient ----
+        preview_data = self._client.build_preview_payload(
+            assembled, model=model_id,
+        )
+
+        pretty = json.dumps(preview_data, indent=2, ensure_ascii=False,
+                            default=str)
+
+        # ---- Show in a popup window ----
+        win = tk.Toplevel(self.root)
+        win.title("Payload Preview")
+        win.geometry("760x600")
+        win.transient(self.root)
+        win.grab_set()
+
+        info_frame = ttk.Frame(win, padding=6)
+        info_frame.pack(fill=tk.X)
+        ttk.Label(info_frame,
+                  text=f"Endpoint: {preview_data['endpoint']}").pack(anchor="w")
+        ttk.Label(info_frame,
+                  text=f"Model family: {preview_data['model_family']}  |  "
+                       f"Messages: {preview_data['message_count']}").pack(anchor="w")
+
+        txt = scrolledtext.ScrolledText(win, wrap=tk.WORD, font=("Consolas", 10))
+        txt.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        txt.insert(tk.END, pretty)
+        txt.config(state=tk.DISABLED)
+
+        btn_frame = ttk.Frame(win, padding=(8, 4))
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="Copy to Clipboard",
+                   command=lambda: (win.clipboard_clear(),
+                                    win.clipboard_append(pretty))
+                   ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Close",
+                   command=win.destroy).pack(side=tk.RIGHT, padx=4)
 
     # ------------------------------------------------------------------
     # Sending messages
@@ -1217,10 +1337,11 @@ class CopilotChatApp:
             self._refresh_sidebar()
 
         # ---- Display in chat ----
-        active_prompts = self._pm.get_active_contents()
+        layout = self._pm.get_ordered_layout()
+        prompt_names = [name for t, name, _, _r in layout if t == "prompt"]
         display = text
-        if active_prompts:
-            names = ", ".join(n for n, _ in active_prompts)
+        if prompt_names:
+            names = ", ".join(prompt_names)
             display = f"[📌 {names}]\n{text}" if text else f"[📌 {names}]"
         for att in self._attachments:
             display += f"\n[📎 {att['name']}]"
@@ -1236,66 +1357,51 @@ class CopilotChatApp:
         self._attachments = []
         self._refresh_attach_bar()
 
-        # ---- Kick off background request ----
+        # ---- Separate message components for layout-based assembly ----
         self._send_btn.config(state=tk.DISABLED)
         self._conv_listbox.config(state=tk.DISABLED)
         self._new_chat_btn.config(state=tk.DISABLED)
         model_id = MODELS[self._model_var.get()]
         model_label = self._model_var.get()
-        # Fetch history from DB and inject active prompts for the API call
+
         all_msgs = (self._store.get_all_messages(self._store.active_id)
                     if self._store.active_id else [])
-        if active_prompts:
-            all_msgs = self._inject_prompts(all_msgs, active_prompts)
+        if not all_msgs:
+            all_msgs = [{"role": "user", "content": content}]
+
+        system_prompt_msg = None
+        history: list[dict] = []
+        current_user_msg = all_msgs[-1]          # always the latest user msg
+
+        for msg in all_msgs[:-1]:
+            if msg.get("role") == "system":
+                system_prompt_msg = msg
+            else:
+                history.append(msg)
+
+        # Determine token budget from cached model limits
+        limits = (self._client.get_model_limits(model_id)
+                  if self._client else None)
+        max_prompt_tokens = limits.max_prompt_tokens if limits else 8_192
+
+        try:
+            assembled = build_messages_from_layout(
+                layout, history, current_user_msg,
+                system_prompt_msg=system_prompt_msg,
+                max_tokens=max_prompt_tokens,
+            )
+        except ValueError as exc:
+            self._send_btn.config(state=tk.NORMAL)
+            self._conv_listbox.config(state=tk.NORMAL)
+            self._new_chat_btn.config(state=tk.NORMAL)
+            messagebox.showerror("Token Limit", str(exc))
+            return
+
         threading.Thread(
             target=self._worker,
-            args=(all_msgs, model_id, model_label),
+            args=(assembled, model_id, model_label),
             daemon=True,
         ).start()
-
-    @staticmethod
-    def _inject_prompts(
-        messages: list[dict],
-        active_prompts: list[tuple[str, str]],
-    ) -> list[dict]:
-        """Return a copy of *messages* with active prompts prepended to the
-        last user message.  The original list is not modified.
-
-        This is used only for API calls — prompts are never stored in DB.
-        """
-        if not active_prompts or not messages:
-            return messages
-
-        prompt_parts = []
-        for pname, pcontent in active_prompts:
-            prompt_parts.append(f"[Prompt: {pname}]\n{pcontent}")
-        prefix = "\n\n".join(prompt_parts) + "\n\n"
-
-        msgs = [m.copy() for m in messages]
-        # Find the last user message and prepend the prompt prefix
-        for i in range(len(msgs) - 1, -1, -1):
-            if msgs[i].get("role") == "user":
-                content = msgs[i]["content"]
-                if isinstance(content, list):
-                    # Multipart: prepend to the first text part
-                    new_parts = []
-                    prefixed = False
-                    for p in content:
-                        if isinstance(p, dict) and p.get("type") == "text" and not prefixed:
-                            new_parts.append({
-                                "type": "text",
-                                "text": prefix + p.get("text", ""),
-                            })
-                            prefixed = True
-                        else:
-                            new_parts.append(p)
-                    if not prefixed:
-                        new_parts.insert(0, {"type": "text", "text": prefix.strip()})
-                    msgs[i]["content"] = new_parts
-                else:
-                    msgs[i]["content"] = prefix + content
-                break
-        return msgs
 
     def _worker(self, messages: list[dict],
                 model_id: str, model_label: str) -> None:
@@ -1304,7 +1410,8 @@ class CopilotChatApp:
             self._queue.put(("start", model_label))
             full = ""
             for chunk in self._client.chat(messages, model=model_id,
-                                           stream=True):
+                                           stream=True,
+                                           pre_assembled=True):
                 full += chunk
                 self._queue.put(("chunk", chunk))
             self._queue.put(("done", full))

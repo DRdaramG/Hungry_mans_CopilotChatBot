@@ -1,15 +1,50 @@
 """
 Personal-prompt manager.
 
-Prompts are stored as a JSON object (``{name: content}``) in
-``Asset/prompts.json`` inside the project root.  The class also supports
-exporting that file to an arbitrary path and importing from one.
+Prompts are stored as a JSON object in ``Asset/prompts.json`` inside the
+project root.  Each entry maps a prompt name to
+``{"content": "...", "role": "system"}``.
+
+Legacy files that map name → plain string are upgraded transparently on
+load (defaulting to ``role="system"``).
 """
 
 import json
 import os
 
 from .paths import asset_path
+
+# ---------------------------------------------------------------------------
+# Special layout slots — always present, cannot be edited or deleted.
+# They mark where chat history and user input are placed in the prompt layout.
+# ---------------------------------------------------------------------------
+
+SLOT_CHAT_HISTORY = "{{CHAT_HISTORY}}"
+SLOT_USER_INPUT = "{{USER_INPUT}}"
+SLOTS = frozenset({SLOT_CHAT_HISTORY, SLOT_USER_INPUT})
+
+SLOT_DISPLAY_NAMES: dict[str, str] = {
+    SLOT_CHAT_HISTORY: "[이전 채팅 기록]",
+    SLOT_USER_INPUT: "[유저 인풋]",
+}
+
+SLOT_DESCRIPTIONS: dict[str, str] = {
+    SLOT_CHAT_HISTORY: (
+        "이전 채팅 기록이 이 위치에 삽입됩니다.\n"
+        "남은 토큰 예산에 맞게 가장 최근 대화부터 채워집니다.\n\n"
+        "Chat history will be inserted at this position.\n"
+        "Most recent messages are included first within the "
+        "remaining token budget."
+    ),
+    SLOT_USER_INPUT: (
+        "현재 사용자의 입력이 이 위치에 삽입됩니다.\n\n"
+        "The current user input will be inserted at this position."
+    ),
+}
+
+#: Valid roles for prompts (matches the OpenAI/Anthropic API).
+VALID_ROLES: tuple[str, ...] = ("system", "user", "assistant")
+DEFAULT_ROLE: str = "system"
 
 
 class PromptManager:
@@ -22,11 +57,13 @@ class PromptManager:
                  active_file: str | None = None) -> None:
         self.storage_file = storage_file or self.DEFAULT_FILE
         self._active_file = active_file or self.ACTIVE_FILE
-        self._prompts: dict[str, str] = {}
+        # Each value: {"content": str, "role": str}
+        self._prompts: dict[str, dict] = {}
         self._active: set[str] = set()          # names of checked prompts
         self._order: list[str] = []             # display / activation order
         self._load()
         self._load_active()
+        self._ensure_slots()
 
     # ------------------------------------------------------------------
     # Internal
@@ -35,7 +72,21 @@ class PromptManager:
     def _load(self) -> None:
         if os.path.exists(self.storage_file):
             with open(self.storage_file, "r", encoding="utf-8") as fh:
-                self._prompts = json.load(fh)
+                raw = json.load(fh)
+            # Upgrade legacy format:  {name: "content_str"}
+            # to current format:      {name: {"content": ..., "role": ...}}
+            self._prompts = {}
+            for name, value in raw.items():
+                if isinstance(value, str):
+                    self._prompts[name] = {
+                        "content": value,
+                        "role": DEFAULT_ROLE,
+                    }
+                elif isinstance(value, dict):
+                    self._prompts[name] = {
+                        "content": value.get("content", ""),
+                        "role": value.get("role", DEFAULT_ROLE),
+                    }
         # Default order = dict insertion order
         self._order = list(self._prompts.keys())
 
@@ -60,7 +111,8 @@ class PromptManager:
                 # Current format
                 saved_order = data.get("order", [])
                 active_list = data.get("active", [])
-                self._order = [n for n in saved_order if n in known]
+                known_with_slots = known | SLOTS
+                self._order = [n for n in saved_order if n in known_with_slots]
                 for name in self._prompts:
                     if name not in self._order:
                         self._order.append(name)
@@ -84,17 +136,29 @@ class PromptManager:
     # CRUD
     # ------------------------------------------------------------------
 
-    def add(self, name: str, content: str) -> None:
-        """Add or overwrite a prompt."""
+    def add(self, name: str, content: str, role: str = DEFAULT_ROLE) -> None:
+        """Add or overwrite a prompt.  Slot names are rejected."""
+        if name in SLOTS:
+            return
+        if role not in VALID_ROLES:
+            role = DEFAULT_ROLE
         is_new = name not in self._prompts
-        self._prompts[name] = content
+        self._prompts[name] = {"content": content, "role": role}
         if is_new:
-            self._order.append(name)
+            # Insert before the user-input slot so new prompts default
+            # to appearing right before the user's message.
+            if SLOT_USER_INPUT in self._order:
+                idx = self._order.index(SLOT_USER_INPUT)
+                self._order.insert(idx, name)
+            else:
+                self._order.append(name)
         self._save()
         self._save_active()
 
     def delete(self, name: str) -> None:
-        """Remove a prompt (no-op if the name does not exist)."""
+        """Remove a prompt (no-op if the name does not exist or is a slot)."""
+        if name in SLOTS:
+            return
         if name in self._prompts:
             del self._prompts[name]
             self._active.discard(name)
@@ -105,7 +169,26 @@ class PromptManager:
 
     def get(self, name: str) -> str:
         """Return a prompt's content, or an empty string if not found."""
-        return self._prompts.get(name, "")
+        entry = self._prompts.get(name)
+        if entry is None:
+            return ""
+        return entry["content"]
+
+    def get_role(self, name: str) -> str:
+        """Return the role of a prompt (defaults to ``"system"``)."""
+        entry = self._prompts.get(name)
+        if entry is None:
+            return DEFAULT_ROLE
+        return entry.get("role", DEFAULT_ROLE)
+
+    def set_role(self, name: str, role: str) -> None:
+        """Change the role of an existing prompt and persist."""
+        if name not in self._prompts or name in SLOTS:
+            return
+        if role not in VALID_ROLES:
+            role = DEFAULT_ROLE
+        self._prompts[name]["role"] = role
+        self._save()
 
     def list_names(self) -> list[str]:
         """Return all prompt names in display order."""
@@ -127,14 +210,14 @@ class PromptManager:
             self._active.discard(name)
         self._save_active()
 
-    def get_active_contents(self) -> list[tuple[str, str]]:
-        """Return ``[(name, content), …]`` for all active prompts.
+    def get_active_contents(self) -> list[tuple[str, str, str]]:
+        """Return ``[(name, content, role), …]`` for all active prompts.
 
         Results follow the current display order so that drag-reordering
         in the Prompt Manager affects the activation order.
         """
         return [
-            (name, self._prompts[name])
+            (name, self._prompts[name]["content"], self._prompts[name]["role"])
             for name in self._order
             if name in self._active and name in self._prompts
         ]
@@ -142,15 +225,61 @@ class PromptManager:
     def reorder(self, new_order: list[str]) -> None:
         """Set a new display / activation order.
 
-        *new_order* should contain all existing prompt names.  Any missing
-        names are appended at the end; unknown names are ignored.
+        *new_order* should contain all existing prompt names and slots.
+        Any missing names are appended at the end; unknown names are ignored.
         """
-        known = set(self._prompts.keys())
+        known = set(self._prompts.keys()) | SLOTS
         self._order = [n for n in new_order if n in known]
         for name in self._prompts:
             if name not in self._order:
                 self._order.append(name)
+        for slot in (SLOT_CHAT_HISTORY, SLOT_USER_INPUT):
+            if slot not in self._order:
+                self._order.append(slot)
         self._save_active()
+
+    # ------------------------------------------------------------------
+    # Slot helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def is_slot(name: str) -> bool:
+        """Return *True* if *name* is a special layout slot."""
+        return name in SLOTS
+
+    def get_ordered_layout(self) -> list[tuple[str, str, str, str]]:
+        """Return the ordered layout as ``[(type, name, content, role), …]``.
+
+        *type* is ``"slot"`` for the two special slots and ``"prompt"``
+        for active user prompts.  Inactive prompts are excluded.
+        """
+        result: list[tuple[str, str, str, str]] = []
+        for name in self._order:
+            if name in SLOTS:
+                result.append(("slot", name, "", ""))
+            elif name in self._active and name in self._prompts:
+                entry = self._prompts[name]
+                result.append((
+                    "prompt", name,
+                    entry["content"], entry.get("role", DEFAULT_ROLE),
+                ))
+        return result
+
+    # ------------------------------------------------------------------
+    # Internal — slot management
+    # ------------------------------------------------------------------
+
+    def _ensure_slots(self) -> None:
+        """Ensure the two special slots exist in the display order."""
+        changed = False
+        if SLOT_CHAT_HISTORY not in self._order:
+            self._order.insert(0, SLOT_CHAT_HISTORY)
+            changed = True
+        if SLOT_USER_INPUT not in self._order:
+            self._order.append(SLOT_USER_INPUT)
+            changed = True
+        if changed:
+            self._save_active()
 
     # ------------------------------------------------------------------
     # Import / export
@@ -176,7 +305,19 @@ class PromptManager:
         Number of prompts imported.
         """
         with open(file_path, "r", encoding="utf-8") as fh:
-            incoming: dict[str, str] = json.load(fh)
+            raw = json.load(fh)
+        # Normalise + filter out slot names
+        incoming: dict[str, dict] = {}
+        for k, v in raw.items():
+            if k in SLOTS:
+                continue
+            if isinstance(v, str):
+                incoming[k] = {"content": v, "role": DEFAULT_ROLE}
+            elif isinstance(v, dict):
+                incoming[k] = {
+                    "content": v.get("content", ""),
+                    "role": v.get("role", DEFAULT_ROLE),
+                }
         if overwrite:
             self._prompts = incoming
             self._order = list(incoming.keys())
@@ -186,5 +327,5 @@ class PromptManager:
                     self._order.append(name)
             self._prompts.update(incoming)
         self._save()
-        self._save_active()
+        self._ensure_slots()          # re-add slots removed by overwrite
         return len(incoming)
