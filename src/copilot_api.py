@@ -131,7 +131,7 @@ class ModelLimits:
 # ---------------------------------------------------------------------------
 MODELS: dict[str, str] = {
     "Claude Opus 4.5": "claude-opus-4-5",
-    "Gemini 3 Pro":    "gemini-3-pro-preview",
+    "Gemini 3.1 Pro":  "gemini-3.1-pro-preview",
     "GPT-4.1":         "gpt-4.1",
 }
 
