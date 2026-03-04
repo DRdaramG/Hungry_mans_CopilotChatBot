@@ -33,7 +33,7 @@ class TestGetModelFamily(unittest.TestCase):
         self.assertEqual(get_model_family("claude-opus-4.5"), "claude")
 
     def test_gemini(self) -> None:
-        self.assertEqual(get_model_family("gemini-3-pro-preview"), "gemini")
+        self.assertEqual(get_model_family("gemini-3.1-pro-preview"), "gemini")
         self.assertEqual(get_model_family("gemini-2.0-flash"), "gemini")
 
     def test_openai(self) -> None:
