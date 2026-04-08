@@ -135,16 +135,35 @@ MODELS: dict[str, str] = {
     "GPT-4.1":         "gpt-4.1",
 }
 
-# Headers that mimic VS Code's Copilot Chat extension.
-_COPILOT_HEADERS = {
-    "Content-Type":           "application/json",
-    "Copilot-Integration-Id": "vscode-chat",
-    "Editor-Version":         "vscode/1.97.0",
-    "Editor-Plugin-Version":  "copilot-chat/0.22.2",
-    "User-Agent":             "GitHubCopilotChat/0.22.2",
-    "openai-intent":          "conversation-panel",
-    "x-github-api-version":   "2023-07-07",
-}
+# Default VS Code version used in the Editor-Version header.
+DEFAULT_VSCODE_VERSION = "1.97.0"
+
+# Module-level mutable version — updated via :func:`set_vscode_version`.
+_vscode_version: str = DEFAULT_VSCODE_VERSION
+
+
+def get_vscode_version() -> str:
+    """Return the current VS Code version string (e.g. ``'1.97.0'``)."""
+    return _vscode_version
+
+
+def set_vscode_version(version: str) -> None:
+    """Set the VS Code version used in ``Editor-Version`` headers."""
+    global _vscode_version
+    _vscode_version = version
+
+
+def _copilot_headers() -> dict[str, str]:
+    """Return headers that mimic VS Code's Copilot Chat extension."""
+    return {
+        "Content-Type":           "application/json",
+        "Copilot-Integration-Id": "vscode-chat",
+        "Editor-Version":         f"vscode/{_vscode_version}",
+        "Editor-Plugin-Version":  "copilot-chat/0.22.2",
+        "User-Agent":             "GitHubCopilotChat/0.22.2",
+        "openai-intent":          "conversation-panel",
+        "x-github-api-version":   "2023-07-07",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +421,7 @@ class CopilotClient:
                       "expires=%.0f). Refreshing…", now, self._token_expires_at)
             try:
                 self._copilot_token, self._token_expires_at = get_copilot_token(
-                    self._github_token
+                    self._github_token, vscode_version=_vscode_version
                 )
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else "?"
@@ -548,7 +567,7 @@ class CopilotClient:
         """
         self._ensure_token()
         headers = {
-            **_COPILOT_HEADERS,
+            **_copilot_headers(),
             "Authorization": f"Bearer {self._copilot_token}",
         }
         try:
@@ -775,7 +794,7 @@ class CopilotClient:
         log.debug("[API] Payload keys: %s", list(payload.keys()))
 
         headers = {
-            **_COPILOT_HEADERS,
+            **_copilot_headers(),
             "Authorization": f"Bearer {self._copilot_token}",
         }
 

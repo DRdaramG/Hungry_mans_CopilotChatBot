@@ -30,6 +30,9 @@ GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
 # Where the GitHub PAT is cached between sessions.
 TOKEN_FILE = asset_path("token.json")
 
+# Where user-configurable settings are persisted.
+SETTINGS_FILE = asset_path("settings.json")
+
 
 # ---------------------------------------------------------------------------
 # Device-flow helpers
@@ -117,20 +120,30 @@ def poll_for_token(device_code: str, interval: int = 5,
 # Copilot token exchange
 # ---------------------------------------------------------------------------
 
-def get_copilot_token(github_token: str) -> tuple[str, int]:
+def get_copilot_token(github_token: str, vscode_version: str | None = None) -> tuple[str, int]:
     """
     Exchange a GitHub PAT for a short-lived Copilot API bearer token.
+
+    Parameters
+    ----------
+    github_token   : GitHub personal access token.
+    vscode_version : VS Code version string (e.g. ``'1.97.0'``).  When
+                     ``None``, falls back to ``DEFAULT_VSCODE_VERSION``.
 
     Returns
     -------
     (copilot_token, expires_at_unix_timestamp)
     """
+    if vscode_version is None:
+        from .copilot_api import DEFAULT_VSCODE_VERSION
+        vscode_version = DEFAULT_VSCODE_VERSION
+
     url = "https://api.github.com/copilot_internal/v2/token"
     headers = {
         "Authorization": f"token {github_token}",
         "Accept": "application/json",
         "User-Agent":    "GitHubCopilotChat/0.22.2",
-        "Editor-Version": "vscode/1.97.0",
+        "Editor-Version": f"vscode/{vscode_version}",
         "Editor-Plugin-Version": "copilot-chat/0.22.2",
     }
 
@@ -189,3 +202,23 @@ def delete_token() -> None:
     """Remove the cached GitHub PAT from disk."""
     if os.path.exists(TOKEN_FILE):
         os.remove(TOKEN_FILE)
+
+
+# ---------------------------------------------------------------------------
+# Persistent settings storage
+# ---------------------------------------------------------------------------
+
+def save_settings(settings: dict) -> None:
+    """Persist user settings to disk, merging with any existing values."""
+    existing = load_settings()
+    existing.update(settings)
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as fh:
+        json.dump(existing, fh)
+
+
+def load_settings() -> dict:
+    """Load user settings from disk, returning an empty dict if absent."""
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    return {}

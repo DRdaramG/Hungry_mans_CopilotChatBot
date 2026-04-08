@@ -30,10 +30,16 @@ from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
 import requests
 
-from .auth import delete_token, load_token, poll_for_token, request_device_code, save_token
+from .auth import (
+    delete_token, load_settings, load_token, poll_for_token,
+    request_device_code, save_settings, save_token,
+)
 from .chat_store import ChatStore
 from .context_manager import build_messages_from_layout
-from .copilot_api import MODELS, CopilotAPIError, CopilotClient
+from .copilot_api import (
+    DEFAULT_VSCODE_VERSION, MODELS, CopilotAPIError, CopilotClient,
+    get_vscode_version, set_vscode_version,
+)
 from .file_handler import process_file
 from .prompt_manager import (
     SLOT_DESCRIPTIONS,
@@ -615,6 +621,7 @@ class CopilotChatApp:
 
         self._refresh_sidebar()
         self._render_history()
+        self._load_saved_settings()
         self._check_saved_token()
         self._pump_queue()
 
@@ -640,6 +647,9 @@ class CopilotChatApp:
                                    command=self._run_auth)
         settings_menu.add_command(label="Clear Saved Token",
                                    command=self._clear_token)
+        settings_menu.add_separator()
+        settings_menu.add_command(label="VS Code Version…",
+                                   command=self._set_vscode_version)
 
     def _build_layout(self) -> None:
         """Create the sidebar + right-content-area split."""
@@ -1019,6 +1029,13 @@ class CopilotChatApp:
     # Token / auth management
     # ------------------------------------------------------------------
 
+    def _load_saved_settings(self) -> None:
+        """Restore persisted user settings (e.g. VS Code version)."""
+        settings = load_settings()
+        saved_version = settings.get("vscode_version")
+        if saved_version:
+            set_vscode_version(saved_version)
+
     def _check_saved_token(self) -> None:
         token = load_token()
         if token:
@@ -1054,6 +1071,22 @@ class CopilotChatApp:
         self._client = None
         self._status_var.set("⚠️  Not authenticated")
         self._sys_msg("Saved token removed. Please re-authenticate.")
+
+    def _set_vscode_version(self) -> None:
+        """Prompt the user to enter a VS Code version for the Editor-Version header."""
+        current = get_vscode_version()
+        version = simpledialog.askstring(
+            "VS Code Version",
+            "Enter the VS Code version to use in API requests\n"
+            "(e.g. 1.97.0):",
+            initialvalue=current,
+            parent=self.root,
+        )
+        if version and version.strip():
+            version = version.strip()
+            set_vscode_version(version)
+            save_settings({"vscode_version": version})
+            self._sys_msg(f"VS Code version updated to {version}.")
 
     def _load_model_limits(self) -> None:
         """Background: fetch per-model token limits from the API."""
