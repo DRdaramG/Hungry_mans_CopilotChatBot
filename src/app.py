@@ -1082,8 +1082,9 @@ class CopilotChatApp:
             initialvalue=current,
             parent=self.root,
         )
-        if version and version.strip():
+        if version:
             version = version.strip()
+        if version:
             set_vscode_version(version)
             save_settings({"vscode_version": version})
             self._sys_msg(f"VS Code version updated to {version}.")
